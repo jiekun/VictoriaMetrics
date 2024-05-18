@@ -124,6 +124,7 @@ func InitRollupResultCache(cachePath string) {
 	})
 
 	rollupResultCacheV = &rollupResultCache{
+		//c: rediscache.NewRedisClient(),
 		c: c,
 	}
 }
@@ -150,10 +151,25 @@ func StopRollupResultCache() {
 		rollupResultCachePath, time.Since(startTime).Seconds(), fcs.EntriesCount, fcs.BytesSize)
 }
 
+type rollupResultCacheClient interface {
+	Get(dst, key []byte) []byte
+	Set(key, value []byte)
+
+	GetBig(dst, key []byte) []byte
+	SetBig(key, value []byte)
+
+	Save(filePath string) error
+
+	Stop()
+
+	UpdateStats(fcs *fastcache.Stats)
+}
+
 // TODO: convert this cache to distributed cache shared among vmselect
 // instances in the cluster.
 type rollupResultCache struct {
-	c *workingsetcache.Cache
+	//c *workingsetcache.Cache
+	c rollupResultCacheClient
 }
 
 var rollupResultCacheResets = metrics.NewCounter(`vm_cache_resets_total{type="promql/rollupResult"}`)
