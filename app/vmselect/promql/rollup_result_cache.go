@@ -4,6 +4,8 @@ import (
 	"crypto/rand"
 	"flag"
 	"fmt"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/fasttime"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/rediscache"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -12,7 +14,6 @@ import (
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/auth"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/bytesutil"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/encoding"
-	"github.com/VictoriaMetrics/VictoriaMetrics/lib/fasttime"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/fs"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/memory"
@@ -61,94 +62,114 @@ var (
 //
 // ResetRollupResultCache must be called when the cache must be reset.
 // StopRollupResultCache must be called when the cache isn't needed anymore.
-func InitRollupResultCache(cachePath string) {
-	rollupResultCachePath = cachePath
-	startTime := time.Now()
-	cacheSize := getRollupResultCacheSize()
-	var c *workingsetcache.Cache
-	if len(rollupResultCachePath) > 0 {
-		if *resetRollupResultCacheOnStartup {
-			logger.Infof("removing rollupResult cache at %q becasue -search.resetRollupResultCacheOnStartup command-line flag is set", rollupResultCachePath)
-			fs.MustRemoveAll(rollupResultCachePath)
+func InitRollupResultCache(cacheType, cachePath, cacheRedisAddr string, cacheRedisTTL time.Duration) {
+	var c rollupResultCacheClient
+
+	switch cacheType {
+	case "in-memory":
+		rollupResultCachePath = cachePath
+		startTime := time.Now()
+		cacheSize := getRollupResultCacheSize()
+		var c *workingsetcache.Cache
+		if len(rollupResultCachePath) > 0 {
+			if *resetRollupResultCacheOnStartup {
+				logger.Infof("removing rollupResult cache at %q becasue -search.resetRollupResultCacheOnStartup command-line flag is set", rollupResultCachePath)
+				fs.MustRemoveAll(rollupResultCachePath)
+			} else {
+				logger.Infof("loading rollupResult cache from %q...", rollupResultCachePath)
+			}
+			c = workingsetcache.Load(rollupResultCachePath, cacheSize)
+			mustLoadRollupResultCacheKeyPrefix(rollupResultCachePath)
 		} else {
-			logger.Infof("loading rollupResult cache from %q...", rollupResultCachePath)
+			c = workingsetcache.New(cacheSize)
+			rollupResultCacheKeyPrefix.Store(newRollupResultCacheKeyPrefix())
 		}
-		c = workingsetcache.Load(rollupResultCachePath, cacheSize)
-		mustLoadRollupResultCacheKeyPrefix(rollupResultCachePath)
-	} else {
-		c = workingsetcache.New(cacheSize)
-		rollupResultCacheKeyPrefix.Store(newRollupResultCacheKeyPrefix())
-	}
-	if *disableCache {
-		c.Reset()
-	}
+		if *disableCache {
+			c.Reset()
+		}
 
-	stats := &fastcache.Stats{}
-	var statsLock sync.Mutex
-	var statsLastUpdate uint64
-	fcs := func() *fastcache.Stats {
-		statsLock.Lock()
-		defer statsLock.Unlock()
+		stats := &fastcache.Stats{}
+		var statsLock sync.Mutex
+		var statsLastUpdate uint64
+		fcs := func() *fastcache.Stats {
+			statsLock.Lock()
+			defer statsLock.Unlock()
 
-		if fasttime.UnixTimestamp()-statsLastUpdate < 2 {
+			if fasttime.UnixTimestamp()-statsLastUpdate < 2 {
+				return stats
+			}
+			var fcs fastcache.Stats
+			c.UpdateStats(&fcs)
+			stats = &fcs
+			statsLastUpdate = fasttime.UnixTimestamp()
 			return stats
 		}
-		var fcs fastcache.Stats
-		c.UpdateStats(&fcs)
-		stats = &fcs
-		statsLastUpdate = fasttime.UnixTimestamp()
-		return stats
-	}
-	if len(rollupResultCachePath) > 0 {
-		logger.Infof("loaded rollupResult cache from %q in %.3f seconds; entriesCount: %d, sizeBytes: %d",
-			rollupResultCachePath, time.Since(startTime).Seconds(), fcs().EntriesCount, fcs().BytesSize)
-	}
+		if len(rollupResultCachePath) > 0 {
+			logger.Infof("loaded rollupResult cache from %q in %.3f seconds; entriesCount: %d, sizeBytes: %d",
+				rollupResultCachePath, time.Since(startTime).Seconds(), fcs().EntriesCount, fcs().BytesSize)
+		}
 
-	// Use metrics.GetOrCreateGauge instead of metrics.NewGauge,
-	// so InitRollupResultCache+StopRollupResultCache could be called multiple times in tests.
-	// See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/2406
-	metrics.GetOrCreateGauge(`vm_cache_entries{type="promql/rollupResult"}`, func() float64 {
-		return float64(fcs().EntriesCount)
-	})
-	metrics.GetOrCreateGauge(`vm_cache_size_bytes{type="promql/rollupResult"}`, func() float64 {
-		return float64(fcs().BytesSize)
-	})
-	metrics.GetOrCreateGauge(`vm_cache_size_max_bytes{type="promql/rollupResult"}`, func() float64 {
-		return float64(fcs().MaxBytesSize)
-	})
-	metrics.GetOrCreateGauge(`vm_cache_requests_total{type="promql/rollupResult"}`, func() float64 {
-		return float64(fcs().GetCalls)
-	})
-	metrics.GetOrCreateGauge(`vm_cache_misses_total{type="promql/rollupResult"}`, func() float64 {
-		return float64(fcs().Misses)
-	})
+		// Use metrics.GetOrCreateGauge instead of metrics.NewGauge,
+		// so InitRollupResultCache+StopRollupResultCache could be called multiple times in tests.
+		// See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/2406
+		metrics.GetOrCreateGauge(`vm_cache_entries{type="promql/rollupResult"}`, func() float64 {
+			return float64(fcs().EntriesCount)
+		})
+		metrics.GetOrCreateGauge(`vm_cache_size_bytes{type="promql/rollupResult"}`, func() float64 {
+			return float64(fcs().BytesSize)
+		})
+		metrics.GetOrCreateGauge(`vm_cache_size_max_bytes{type="promql/rollupResult"}`, func() float64 {
+			return float64(fcs().MaxBytesSize)
+		})
+		metrics.GetOrCreateGauge(`vm_cache_requests_total{type="promql/rollupResult"}`, func() float64 {
+			return float64(fcs().GetCalls)
+		})
+		metrics.GetOrCreateGauge(`vm_cache_misses_total{type="promql/rollupResult"}`, func() float64 {
+			return float64(fcs().Misses)
+		})
+	case "redis":
+		redisClient := rediscache.NewRedisClient(cacheRedisAddr, cacheRedisTTL)
+		metrics.GetOrCreateGauge(`vm_cache_requests_total{type="promql/rollupResult"}`, func() float64 {
+			return float64(redisClient.GetCalls())
+		})
+		metrics.GetOrCreateGauge(`vm_cache_misses_total{type="promql/rollupResult"}`, func() float64 {
+			return float64(redisClient.GetMisses())
+		})
+		c = redisClient
+	}
 
 	rollupResultCacheV = &rollupResultCache{
-		//c: rediscache.NewRedisClient(),
 		c: c,
 	}
 }
 
 // StopRollupResultCache closes the rollupResult cache.
-func StopRollupResultCache() {
-	if len(rollupResultCachePath) == 0 {
+func StopRollupResultCache(cacheType string) {
+	switch cacheType {
+	case "in-memory":
+		if len(rollupResultCachePath) == 0 {
+			rollupResultCacheV.c.Stop()
+			rollupResultCacheV.c = nil
+			return
+		}
+		logger.Infof("saving rollupResult cache to %q...", rollupResultCachePath)
+		startTime := time.Now()
+		if err := rollupResultCacheV.c.Save(rollupResultCachePath); err != nil {
+			logger.Errorf("cannot save rollupResult cache at %q: %s", rollupResultCachePath, err)
+			return
+		}
+		mustSaveRollupResultCacheKeyPrefix(rollupResultCachePath)
+		var fcs fastcache.Stats
+		rollupResultCacheV.c.UpdateStats(&fcs)
 		rollupResultCacheV.c.Stop()
 		rollupResultCacheV.c = nil
-		return
+		logger.Infof("saved rollupResult cache to %q in %.3f seconds; entriesCount: %d, sizeBytes: %d",
+			rollupResultCachePath, time.Since(startTime).Seconds(), fcs.EntriesCount, fcs.BytesSize)
+	case "redis":
+		// unlike in-memory cache, redis.Stop() actually does nothing.
+		rollupResultCacheV.c.Stop()
+		rollupResultCacheV.c = nil
 	}
-	logger.Infof("saving rollupResult cache to %q...", rollupResultCachePath)
-	startTime := time.Now()
-	if err := rollupResultCacheV.c.Save(rollupResultCachePath); err != nil {
-		logger.Errorf("cannot save rollupResult cache at %q: %s", rollupResultCachePath, err)
-		return
-	}
-	mustSaveRollupResultCacheKeyPrefix(rollupResultCachePath)
-	var fcs fastcache.Stats
-	rollupResultCacheV.c.UpdateStats(&fcs)
-	rollupResultCacheV.c.Stop()
-	rollupResultCacheV.c = nil
-	logger.Infof("saved rollupResult cache to %q in %.3f seconds; entriesCount: %d, sizeBytes: %d",
-		rollupResultCachePath, time.Since(startTime).Seconds(), fcs.EntriesCount, fcs.BytesSize)
 }
 
 type rollupResultCacheClient interface {
@@ -168,7 +189,6 @@ type rollupResultCacheClient interface {
 // TODO: convert this cache to distributed cache shared among vmselect
 // instances in the cluster.
 type rollupResultCache struct {
-	//c *workingsetcache.Cache
 	c rollupResultCacheClient
 }
 

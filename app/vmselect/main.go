@@ -43,7 +43,12 @@ var (
 	useProxyProtocol = flagutil.NewArrayBool("httpListenAddr.useProxyProtocol", "Whether to use proxy protocol for connections accepted at the given -httpListenAddr . "+
 		"See https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt . "+
 		"With enabled proxy protocol http server cannot serve regular /metrics endpoint. Use -pushmetrics.url for metrics pushing")
-	cacheDataPath         = flag.String("cacheDataPath", "", "Path to directory for cache files. By default, the cache is not persisted.")
+
+	cacheType      = flag.String("cacheType", "in-memory", "Cache type for rollup result. Available options: in-memory(default), redis.")
+	cacheDataPath  = flag.String("cacheDataPath", "", "Path to directory for cache files. By default, the cache is not persisted. It's only available when `cacheType` is not set or set to `in-memory`.")
+	cacheRedisAddr = flag.String("cacheRedisAddr", "", "Address for redis cache. It's only available when `cacheType` is set to `redis`. Usage: -cacheRedisAddr=127.0.0.1:6379")
+	cacheRedisTTL  = flag.Duration("cacheRedisTTL", time.Minute, "TTL for redis cache items. It's only available when `cacheType` is set to `redis`. Usage: -cacheRedisTTL=1m (default)")
+
 	maxConcurrentRequests = flag.Int("search.maxConcurrentRequests", getDefaultMaxConcurrentRequests(), "The maximum number of concurrent search requests. "+
 		"It shouldn't be high, since a single request can saturate all the CPU cores, while many concurrently executed requests may require high amounts of memory. "+
 		"See also -search.maxQueueDuration and -search.maxMemoryPerQuery")
@@ -113,10 +118,10 @@ func main() {
 		tmpDataPath := *cacheDataPath + "/tmp"
 		fs.RemoveDirContents(tmpDataPath)
 		netstorage.InitTmpBlocksDir(tmpDataPath)
-		promql.InitRollupResultCache(*cacheDataPath + "/rollupResult")
+		promql.InitRollupResultCache(*cacheType, *cacheDataPath+"/rollupResult", *cacheRedisAddr, *cacheRedisTTL)
 	} else {
 		netstorage.InitTmpBlocksDir("")
-		promql.InitRollupResultCache("")
+		promql.InitRollupResultCache(*cacheType, "", *cacheRedisAddr, *cacheRedisTTL)
 	}
 	concurrencyLimitCh = make(chan struct{}, *maxConcurrentRequests)
 	initVMAlertProxy()
@@ -158,9 +163,7 @@ func main() {
 	logger.Infof("shutting down neststorage...")
 	startTime = time.Now()
 	netstorage.MustStop()
-	if len(*cacheDataPath) > 0 {
-		promql.StopRollupResultCache()
-	}
+	promql.StopRollupResultCache(*cacheType)
 	logger.Infof("successfully stopped netstorage in %.3f seconds", time.Since(startTime).Seconds())
 
 	fs.MustStopDirRemover()

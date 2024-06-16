@@ -11,28 +11,41 @@ import (
 )
 
 type RedisRollupResultCacheClient struct {
-	c redis.UniversalClient
+	c   redis.UniversalClient
+	ttl time.Duration
+
+	// stats
+	calls  uint64
+	misses uint64
 }
 
-func NewRedisClient() *RedisRollupResultCacheClient {
+func NewRedisClient(redisAddr string, ttl time.Duration) *RedisRollupResultCacheClient {
 	return &RedisRollupResultCacheClient{
 		c: redis.NewUniversalClient(&redis.UniversalOptions{
-			Addrs: []string{"127.0.0.1:6379"},
+			Addrs: []string{redisAddr},
 		}),
+		ttl:    ttl,
+		calls:  0,
+		misses: 0,
 	}
 }
 
 func (rc *RedisRollupResultCacheClient) Get(dst, key []byte) []byte {
+	rc.calls++
+
 	var err error
-	dst, err = rc.c.GetEx(context.TODO(), string(key), time.Minute).Bytes()
-	if err != nil && !errors.Is(err, redis.Nil) {
+	dst, err = rc.c.GetEx(context.TODO(), string(key), rc.ttl).Bytes()
+	if errors.Is(err, redis.Nil) {
+		rc.misses++
+	} else if err != nil {
 		logger.Errorf("get rollup result cache from redis failed: %v", err)
 	}
+
 	return dst
 }
 
 func (rc *RedisRollupResultCacheClient) Set(key, value []byte) {
-	if err := rc.c.Set(context.TODO(), string(key), value, time.Minute).Err(); err != nil {
+	if err := rc.c.Set(context.TODO(), string(key), value, rc.ttl).Err(); err != nil {
 		logger.Errorf("set rollup result cache to redis failed: %v", err)
 	}
 	return
@@ -53,3 +66,6 @@ func (rc *RedisRollupResultCacheClient) Stop() {}
 func (rc *RedisRollupResultCacheClient) UpdateStats(fcs *fastcache.Stats) {
 	return
 }
+
+func (rc *RedisRollupResultCacheClient) GetCalls() uint64  { return rc.calls }
+func (rc *RedisRollupResultCacheClient) GetMisses() uint64 { return rc.misses }

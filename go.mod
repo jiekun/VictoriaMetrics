@@ -23,6 +23,7 @@ require (
 	github.com/influxdata/influxdb v1.11.5
 	github.com/klauspost/compress v1.17.8
 	github.com/prometheus/prometheus v0.52.1
+	github.com/redis/go-redis/v9 v9.5.3
 	github.com/urfave/cli/v2 v2.27.2
 	github.com/valyala/fastjson v1.6.4
 	github.com/valyala/fastrand v1.1.0
@@ -68,6 +69,7 @@ require (
 	github.com/cpuguy83/go-md2man/v2 v2.0.4 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dennwc/varint v1.0.0 // indirect
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/fatih/color v1.17.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-kit/log v0.2.1 // indirect
